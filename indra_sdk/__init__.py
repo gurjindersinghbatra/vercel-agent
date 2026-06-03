@@ -240,3 +240,87 @@ def request(method: str, url: str, headers: dict = None, data: bytes = None, **k
 
     req = urllib.request.Request(proxy_url, data=data, headers=headers, method=method.upper())
     return urllib.request.urlopen(req, **kwargs)
+
+def close(daemon_url: str = "http://localhost:18787"):
+    """
+    Terminates the active agent session.
+    In standard mode: Deregisters from the local sidecar.
+    In serverless mode: Sends a signed revocation request directly to the Edge Worker.
+    """
+    global _mission_token, _session_key, _public_jwk, _worker_host, _fido_id, _is_serverless
+
+    if not _is_serverless:
+        pid = os.getpid()
+        url = f"{daemon_url.rstrip('/')}/unregister-agent-session?pid={pid}"
+        try:
+            req = urllib.request.Request(url, method="POST")
+            with urllib.request.urlopen(req) as response:
+                if response.status == 200:
+                    print(f"[*] Indra SDK: Unregistered session for PID {pid}")
+                else:
+                    print(f"[!] Indra SDK: Unregistration failed: {response.read().decode('utf-8')}")
+        except Exception as e:
+            print(f"[!] Indra SDK: Failed to connect to sidecar for unregistration: {e}")
+    else:
+        if not _mission_token:
+            return
+
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+        method = "POST"
+        url = f"https://{_worker_host}/api/mission/stop"
+        if _worker_host.startswith("localhost:") or _worker_host.startswith("127.0.0.1:"):
+            url = f"http://{_worker_host}/api/mission/stop"
+
+        dpop_header = {
+            "alg": "ES256",
+            "typ": "dpop+jwt",
+            "jwk": _public_jwk
+        }
+        header_b64 = base64.urlsafe_b64encode(
+            json.dumps(dpop_header, separators=(',', ':')).encode('utf-8')
+        ).decode('utf-8').rstrip('=')
+
+        dpop_payload = {
+            "jti": str(uuid.uuid4()),
+            "htm": method,
+            "htu": url,
+            "iat": int(time.time())
+        }
+        payload_b64 = base64.urlsafe_b64encode(
+            json.dumps(dpop_payload, separators=(',', ':')).encode('utf-8')
+        ).decode('utf-8').rstrip('=')
+
+        signing_input = f"{header_b64}.{payload_b64}".encode('utf-8')
+
+        signature_der = _session_key.sign(
+            signing_input,
+            ec.ECDSA(hashes.SHA256())
+        )
+
+        r, s = decode_dss_signature(signature_der)
+        raw_signature = r.to_bytes(32, byteorder='big') + s.to_bytes(32, byteorder='big')
+        signature_b64 = base64.urlsafe_b64encode(raw_signature).decode('utf-8').rstrip('=')
+
+        dpop_jwt = f"{header_b64}.{payload_b64}.{signature_b64}"
+
+        headers = {
+            "X-Indra-Mission-Token": _mission_token,
+            "X-Indra-Source-Machine": _fido_id,
+            "DPoP": dpop_jwt,
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        }
+
+        try:
+            req = urllib.request.Request(url, headers=headers, method=method)
+            with urllib.request.urlopen(req) as response:
+                if response.status == 200:
+                    print(f"[*] Indra SDK: Ephemeral session terminated successfully on the Edge.")
+                    _mission_token = None
+                else:
+                    print(f"[!] Indra SDK: Session termination returned status {response.status}")
+        except Exception as e:
+            print(f"[!] Indra SDK: Ephemeral session termination failed: {e}")
+
