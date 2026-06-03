@@ -51,7 +51,7 @@ def run_agent():
         )
 
         # 2. Make outbound proxy requests using the SDK
-        url = "https://api.stripe.com/v1/charges"
+        url = "https://google.com/finance"
         print(f"[AGENT] Executing secure proxy request to {url}")
         
         response = indra_sdk.request("GET", url)
