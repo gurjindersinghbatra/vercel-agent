@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import urllib.error
 from flask import Flask, jsonify
 
 # Add parent directory to sys.path so we can import indra_sdk
@@ -44,6 +45,17 @@ def run_agent():
             'data': data
         }), status_code
 
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8')
+        try:
+            body = json.loads(body)
+        except:
+            pass
+        return jsonify({
+            'success': False,
+            'error': f"HTTP {e.code}: {e.reason}",
+            'body': body
+        }), e.code
     except Exception as e:
         import traceback
         error_trace = traceback.format_exc()
