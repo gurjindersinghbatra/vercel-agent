@@ -11,6 +11,7 @@ import indra_sdk
 app = Flask(__name__)
 
 @app.route('/api/agent', methods=['GET', 'POST'])
+@app.route('/', methods=['GET', 'POST'])
 def run_agent():
     try:
         # 1. Initialize Indra SDK in serverless mode

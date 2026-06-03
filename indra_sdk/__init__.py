@@ -140,7 +140,10 @@ def init(task: str, delegation_token: str = None, env_var: str = None, daemon_ur
             url = f"http://{worker_host}/api/mission/start"
 
         req_body = json.dumps(payload).encode('utf-8')
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        }
         
         try:
             req = urllib.request.Request(url, data=req_body, headers=headers, method="POST")
@@ -180,6 +183,15 @@ def request(method: str, url: str, headers: dict = None, data: bytes = None, **k
         headers = {}
     else:
         headers = dict(headers)
+
+    # Set User-Agent if not already present to prevent Cloudflare BIC blocks (Error 1010)
+    has_user_agent = False
+    for k in headers.keys():
+        if k.lower() == 'user-agent':
+            has_user_agent = True
+            break
+    if not has_user_agent:
+        headers['User-Agent'] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     # 1. Generate DPoP JWT Proof
     dpop_header = {
