@@ -14,6 +14,22 @@ _public_jwk = None
 _worker_host = None
 _fido_id = None
 _is_serverless = False
+_patched = False
+_proxy_pool = None
+
+import threading
+import contextlib
+_local = threading.local()
+
+@contextlib.contextmanager
+def bypass_interceptor():
+    old = getattr(_local, "in_interceptor", False)
+    _local.in_interceptor = True
+    try:
+        yield
+    finally:
+        _local.in_interceptor = old
+
 
 def init(task: str, delegation_token: str = None, env_var: str = None, daemon_url: str = "http://localhost:18787", is_serverless: bool = None):
     """
@@ -153,6 +169,7 @@ def init(task: str, delegation_token: str = None, env_var: str = None, daemon_ur
                 if response.status == 200 and result.get("success"):
                     _mission_token = result.get("missionToken")
                     print(f"[*] Indra SDK: Direct Edge handshake successful! Mission Token: {_mission_token[:8]}...")
+                    _patch_http_clients()
                 else:
                     raise RuntimeError(f"Handshake failed: {body}")
         except urllib.error.HTTPError as e:
@@ -161,16 +178,12 @@ def init(task: str, delegation_token: str = None, env_var: str = None, daemon_ur
         except Exception as e:
             raise RuntimeError(f"Failed direct handshake with Edge Worker at {url}: {e}")
 
-def request(method: str, url: str, headers: dict = None, data: bytes = None, **kwargs):
+def _prepare_proxied_request(method: str, url: str, headers: dict = None):
     """
-    Routes an outbound HTTP request transparently through the Indra Edge Proxy (Serverless Mode).
-    Attaches the required X-Indra-Mission-Token, X-Indra-Source-Machine, and signed DPoP proof.
+    Generates proxy URL and signs the request headers (DPoP, mission token, etc.).
+    Returns (proxy_url, updated_headers).
     """
-    global _mission_token, _session_key, _public_jwk, _worker_host, _fido_id, _is_serverless
-
-    if not _is_serverless:
-        # Standard mode redirects to loopback proxy without adding headers manually
-        raise RuntimeError("Indra SDK: request() is only supported in Serverless/PaaS mode. In standard mode, use standard HTTP libraries with proxy environment variables.")
+    global _mission_token, _session_key, _public_jwk, _worker_host, _fido_id
 
     if not _mission_token:
         raise RuntimeError("Indra SDK: Session not initialized. Call init() first.")
@@ -184,7 +197,7 @@ def request(method: str, url: str, headers: dict = None, data: bytes = None, **k
     else:
         headers = dict(headers)
 
-    # Set User-Agent if not already present to prevent Cloudflare BIC blocks (Error 1010)
+    # Set User-Agent if not already present to prevent Cloudflare BIC blocks
     has_user_agent = False
     for k in headers.keys():
         if k.lower() == 'user-agent':
@@ -238,8 +251,167 @@ def request(method: str, url: str, headers: dict = None, data: bytes = None, **k
     if _worker_host.startswith("localhost:") or _worker_host.startswith("127.0.0.1:"):
         proxy_url = f"http://{_worker_host}/proxy/{url}"
 
-    req = urllib.request.Request(proxy_url, data=data, headers=headers, method=method.upper())
-    return urllib.request.urlopen(req, **kwargs)
+    return proxy_url, headers
+
+
+def request(method: str, url: str, headers: dict = None, data: bytes = None, **kwargs):
+    """
+    Routes an outbound HTTP request transparently through the Indra Edge Proxy (Serverless Mode).
+    Attaches the required X-Indra-Mission-Token, X-Indra-Source-Machine, and signed DPoP proof.
+    """
+    global _is_serverless
+
+    if not _is_serverless:
+        # Standard mode redirects to loopback proxy without adding headers manually
+        raise RuntimeError("Indra SDK: request() is only supported in Serverless/PaaS mode. In standard mode, use standard HTTP libraries with proxy environment variables.")
+
+    proxy_url, proxy_headers = _prepare_proxied_request(method, url, headers)
+
+    with bypass_interceptor():
+        req = urllib.request.Request(proxy_url, data=data, headers=proxy_headers, method=method.upper())
+        return urllib.request.urlopen(req, **kwargs)
+
+
+def _patch_http_clients():
+    global _patched
+    if _patched:
+        return
+    _patched = True
+
+    # --- 1. urllib.request.urlopen Patch ---
+    import urllib.request
+    import socket
+    original_urlopen = urllib.request.urlopen
+
+    def patched_urlopen(url, data=None, *args, **kwargs):
+        if not _is_serverless or getattr(_local, "in_interceptor", False):
+            return original_urlopen(url, data=data, *args, **kwargs)
+
+        import urllib.request
+        if isinstance(url, urllib.request.Request):
+            original_url = url.full_url
+            method = url.get_method()
+            headers = {k: v for k, v in url.header_items()}
+            # Construct DPoP and proxy URL
+            proxy_url, proxy_headers = _prepare_proxied_request(method, original_url, headers)
+            # Create a new Request object
+            new_req = urllib.request.Request(
+                proxy_url,
+                data=url.data,
+                headers=proxy_headers,
+                origin_req_host=url.origin_req_host,
+                unverifiable=url.unverifiable,
+                method=method
+            )
+            with bypass_interceptor():
+                return original_urlopen(new_req, data=None, *args, **kwargs)
+        else:
+            # url is a string
+            method = "POST" if data is not None else "GET"
+            proxy_url, proxy_headers = _prepare_proxied_request(method, url, {})
+            new_req = urllib.request.Request(proxy_url, data=data, headers=proxy_headers, method=method)
+            with bypass_interceptor():
+                return original_urlopen(new_req, data=None, *args, **kwargs)
+
+    urllib.request.urlopen = patched_urlopen
+
+    # --- 2. urllib3 ConnectionPool.urlopen Patch ---
+    try:
+        import urllib3.connectionpool
+        original_urllib3_urlopen = urllib3.connectionpool.HTTPConnectionPool.urlopen
+
+        def patched_urllib3_urlopen(self, method, url, body=None, headers=None, **kwargs):
+            if not _is_serverless or getattr(_local, "in_interceptor", False):
+                return original_urllib3_urlopen(self, method, url, body=body, headers=headers, **kwargs)
+
+            # Reconstruct original URL
+            scheme = self.scheme
+            host = self.host
+            port = self.port
+            
+            # Reconstruct full URL
+            if url.startswith("http://") or url.startswith("https://"):
+                original_url = url
+            else:
+                port_part = ""
+                if (scheme == "https" and port != 443) or (scheme == "http" and port != 80):
+                    if port is not None:
+                        port_part = f":{port}"
+                original_url = f"{scheme}://{host}{port_part}{url}"
+
+            # Prepare proxied request headers and URL
+            proxy_url, proxy_headers = _prepare_proxied_request(method, original_url, headers)
+
+            # Delegate to connection pool of _worker_host
+            import urllib.parse
+            parsed_proxy = urllib.parse.urlparse(proxy_url)
+            proxy_scheme = parsed_proxy.scheme
+            proxy_netloc = parsed_proxy.netloc
+            proxy_path = parsed_proxy.path
+            if parsed_proxy.query:
+                proxy_path += f"?{parsed_proxy.query}"
+
+            # Retrieve connection pool for the proxy
+            global _proxy_pool
+            if _proxy_pool is None:
+                _proxy_pool = urllib3.connection_from_url(f"{proxy_scheme}://{proxy_netloc}")
+            proxy_pool = _proxy_pool
+
+            with bypass_interceptor():
+                return original_urllib3_urlopen(proxy_pool, method, proxy_path, body=body, headers=proxy_headers, **kwargs)
+
+        urllib3.connectionpool.HTTPConnectionPool.urlopen = patched_urllib3_urlopen
+    except ImportError:
+        pass
+
+    # --- 3. httpx Patch ---
+    try:
+        import httpx
+        original_httpx_send = httpx.Client.send
+        original_httpx_async_send = httpx.AsyncClient.send
+
+        def patched_httpx_send(self, request, **kwargs):
+            if not _is_serverless or getattr(_local, "in_interceptor", False):
+                return original_httpx_send(self, request, **kwargs)
+
+            method = request.method
+            original_url = str(request.url)
+            headers = dict(request.headers)
+
+            proxy_url, proxy_headers = _prepare_proxied_request(method, original_url, headers)
+
+            # Mutate request object to point to proxy
+            request.url = httpx.URL(proxy_url)
+            request.headers.clear()
+            for k, v in proxy_headers.items():
+                request.headers[k] = v
+
+            with bypass_interceptor():
+                return original_httpx_send(self, request, **kwargs)
+
+        async def patched_httpx_async_send(self, request, **kwargs):
+            if not _is_serverless or getattr(_local, "in_interceptor", False):
+                return await original_httpx_async_send(self, request, **kwargs)
+
+            method = request.method
+            original_url = str(request.url)
+            headers = dict(request.headers)
+
+            proxy_url, proxy_headers = _prepare_proxied_request(method, original_url, headers)
+
+            request.url = httpx.URL(proxy_url)
+            request.headers.clear()
+            for k, v in proxy_headers.items():
+                request.headers[k] = v
+
+            with bypass_interceptor():
+                return await original_httpx_async_send(self, request, **kwargs)
+
+        httpx.Client.send = patched_httpx_send
+        httpx.AsyncClient.send = patched_httpx_async_send
+    except ImportError:
+        pass
+
 
 def close(daemon_url: str = "http://localhost:18787"):
     """
