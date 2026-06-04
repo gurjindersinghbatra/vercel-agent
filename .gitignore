@@ -1,2 +1,6 @@
 .vercel
 .env*
+venv/
+run_local_dev.py
+__pycache__/
+*.pyc
