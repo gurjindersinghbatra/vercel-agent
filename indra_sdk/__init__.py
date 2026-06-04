@@ -272,6 +272,14 @@ def request(method: str, url: str, headers: dict = None, data: bytes = None, **k
         return urllib.request.urlopen(req, **kwargs)
 
 
+def _is_indra_host(url_str):
+    global _worker_host
+    if not _worker_host:
+        return False
+    worker_clean = _worker_host.replace("http://", "").replace("https://", "").split(":")[0].lower()
+    return worker_clean in url_str.lower()
+
+
 def _patch_http_clients():
     global _patched
     if _patched:
@@ -288,6 +296,10 @@ def _patch_http_clients():
             return original_urlopen(url, data=data, *args, **kwargs)
 
         import urllib.request
+        url_str = url.full_url if isinstance(url, urllib.request.Request) else url
+        if _is_indra_host(url_str):
+            return original_urlopen(url, data=data, *args, **kwargs)
+
         if isinstance(url, urllib.request.Request):
             original_url = url.full_url
             method = url.get_method()
@@ -329,6 +341,10 @@ def _patch_http_clients():
             host = self.host
             port = self.port
             
+            # Bypass if self.host is worker host
+            if _is_indra_host(host):
+                return original_urllib3_urlopen(self, method, url, body=body, headers=headers, **kwargs)
+
             # Reconstruct full URL
             if url.startswith("http://") or url.startswith("https://"):
                 original_url = url
@@ -338,6 +354,10 @@ def _patch_http_clients():
                     if port is not None:
                         port_part = f":{port}"
                 original_url = f"{scheme}://{host}{port_part}{url}"
+
+            # Bypass if full URL is worker host
+            if _is_indra_host(original_url):
+                return original_urllib3_urlopen(self, method, url, body=body, headers=headers, **kwargs)
 
             # Prepare proxied request headers and URL
             proxy_url, proxy_headers = _prepare_proxied_request(method, original_url, headers)
@@ -374,8 +394,11 @@ def _patch_http_clients():
             if not _is_serverless or getattr(_local, "in_interceptor", False):
                 return original_httpx_send(self, request, **kwargs)
 
-            method = request.method
             original_url = str(request.url)
+            if _is_indra_host(original_url):
+                return original_httpx_send(self, request, **kwargs)
+
+            method = request.method
             headers = dict(request.headers)
 
             proxy_url, proxy_headers = _prepare_proxied_request(method, original_url, headers)
@@ -393,8 +416,11 @@ def _patch_http_clients():
             if not _is_serverless or getattr(_local, "in_interceptor", False):
                 return await original_httpx_async_send(self, request, **kwargs)
 
-            method = request.method
             original_url = str(request.url)
+            if _is_indra_host(original_url):
+                return await original_httpx_async_send(self, request, **kwargs)
+
+            method = request.method
             headers = dict(request.headers)
 
             proxy_url, proxy_headers = _prepare_proxied_request(method, original_url, headers)
@@ -487,12 +513,13 @@ def close(daemon_url: str = "http://localhost:18787"):
 
         try:
             req = urllib.request.Request(url, headers=headers, method=method)
-            with urllib.request.urlopen(req) as response:
-                if response.status == 200:
-                    print(f"[*] Indra SDK: Ephemeral session terminated successfully on the Edge.")
-                    _mission_token = None
-                else:
-                    print(f"[!] Indra SDK: Session termination returned status {response.status}")
+            with bypass_interceptor():
+                with urllib.request.urlopen(req) as response:
+                    if response.status == 200:
+                        print(f"[*] Indra SDK: Ephemeral session terminated successfully on the Edge.")
+                        _mission_token = None
+                    else:
+                        print(f"[!] Indra SDK: Session termination returned status {response.status}")
         except Exception as e:
             print(f"[!] Indra SDK: Ephemeral session termination failed: {e}")
 
