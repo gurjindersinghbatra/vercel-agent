@@ -147,12 +147,12 @@ def index():
         /* Grid for Tests */
         .test-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(3, 1fr);
             gap: 24px;
             margin-bottom: 30px;
         }
 
-        @media (max-width: 768px) {
+        @media (max-width: 992px) {
             .test-grid {
                 grid-template-columns: 1fr;
             }
@@ -512,6 +512,37 @@ def index():
                     </button>
                 </div>
             </div>
+
+            <!-- Revocation Loop Test Card -->
+            <div class="card negative" style="border-top: 4px solid var(--accent-amber)">
+                <div class="card-header">
+                    <div class="card-tag" style="background: rgba(245, 158, 11, 0.1); color: var(--accent-amber)">Revocation Test</div>
+                    <h2 class="card-title">Revocation Loop Test</h2>
+                    <p class="card-desc">The agent runs a loop making a Stripe charge every 10 seconds. Revoking the mission from the Edge Dashboard should instantly block subsequent calls.</p>
+                </div>
+                
+                <div>
+                    <div class="task-spec">
+                        <div class="task-spec-row">
+                            <span class="task-label">Assigned Task:</span>
+                            <span class="task-val task-text">"Make stripe charges of $100"</span>
+                        </div>
+                        <div class="task-spec-row">
+                            <span class="task-label">Action Attempted:</span>
+                            <span class="task-val">Loop: POST /v1/charges</span>
+                        </div>
+                        <div class="task-spec-row">
+                            <span class="task-label">Expected Output:</span>
+                            <span class="task-val" style="color: var(--accent-rose)">403 after Revocation</span>
+                        </div>
+                    </div>
+                    
+                    <button class="btn" style="background: var(--accent-amber); color: #451a03;" onclick="runTest('revocation')">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+                        Run Revocation Test
+                    </button>
+                </div>
+            </div>
         </div>
 
         <!-- Terminal Console -->
@@ -580,6 +611,69 @@ def index():
             
             appendLog(`Initializing ${type.toUpperCase()} test case...`, 'log-indra');
             
+            if (type === 'revocation') {
+                try {
+                    const response = await fetch(`/api/revoke-test`);
+                    if (!response.body) {
+                        appendLog(`Streaming not supported by browser.`, 'log-error');
+                        return;
+                    }
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let done = false;
+                    let buffer = '';
+
+                    while (!done) {
+                        const { value, done: doneReading } = await reader.read();
+                        done = doneReading;
+                        buffer += decoder.decode(value, { stream: !done });
+                        
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop(); // Keep the last partial line in buffer
+                        
+                        for (const line of lines) {
+                            if (!line.trim()) continue;
+                            let cssClass = '';
+                            let cleanLog = line;
+                            
+                            if (line.startsWith('[Indra]')) {
+                                cssClass = 'log-indra';
+                            } else if (line.startsWith('[Agent]')) {
+                                cssClass = 'log-agent';
+                            } else if (line.startsWith('[LLM]')) {
+                                cssClass = 'log-llm';
+                            } else if (line.startsWith('[Stripe]')) {
+                                cssClass = 'log-stripe';
+                            } else if (line.startsWith('[Error]')) {
+                                cssClass = 'log-error';
+                            } else if (line.includes('Success')) {
+                                cssClass = 'log-success';
+                            }
+                            
+                            // Parse custom security alerts
+                            if (line.startsWith('[SECURITY ALERT]')) {
+                                appendLog('[SECURITY ALERT] Outbound request blocked!', 'log-alert');
+                                continue;
+                            }
+                            
+                            if (line.startsWith('[Reason]')) {
+                                appendLog(line, 'log-reason');
+                                continue;
+                            }
+                            
+                            appendLog(cleanLog, cssClass);
+                        }
+                    }
+                    appendLog(`Revocation Loop Test completed.`, 'log-success');
+                } catch (err) {
+                    appendLog(`Connection error: ${err.message}`, 'log-error');
+                } finally {
+                    statusDot.className = 'status-indicator';
+                    statusText.innerText = 'IDLE';
+                }
+                return;
+            }
+
             try {
                 const response = await fetch(`/api/agent?test_type=${type}`);
                 const data = await response.json();
@@ -809,4 +903,86 @@ def run_agent():
             logs.append("[Indra] Session securely closed.")
         except Exception as close_err:
             print(f"[AGENT-ERROR] Failed to close agent session: {close_err}")
+
+
+@app.route('/api/revoke-test')
+def run_revoke_test():
+    import time
+    from flask import Response, stream_with_context
+
+    def generate():
+        task_name = "Make stripe charges of $100"
+        
+        try:
+            # 1. Initialize Indra SDK in serverless mode
+            indra_sdk.init(
+                task=task_name,
+                is_serverless=True
+            )
+            yield "[Indra] Session initialized securely on the Edge.\n"
+            yield f"[Indra] Task context set to: \"{task_name}\"\n"
+            yield "[Agent] Starting loop to make Stripe calls (interval: 10s). Go to the Edge Dashboard and click KILL to test revocation!\n"
+            
+            stripe_key = os.getenv("STRIPE_API_KEY") or "sk_test_mock_stripe_key"
+            
+            for i in range(1, 6):
+                yield f"[Agent] Loop iteration {i}/5: Initiating Stripe charge...\n"
+                
+                headers = {
+                    "Authorization": f"Bearer {stripe_key}",
+                    "Content-Type": "application/x-www-form-urlencoded"
+                }
+                payload = {
+                    "amount": 10000, # $100 in cents
+                    "currency": "usd",
+                    "source": "tok_visa"
+                }
+                
+                # Make the Stripe call
+                req = urllib.request.Request(
+                    "https://api.stripe.com/v1/charges",
+                    headers=headers,
+                    data=urllib.parse.urlencode(payload).encode('utf-8'),
+                    method="POST"
+                )
+                
+                try:
+                    with urllib.request.urlopen(req) as resp:
+                        status = resp.status
+                        body = resp.read().decode('utf-8')
+                    
+                    if status == 200:
+                        yield "[Stripe] Success! Charge created.\n"
+                    else:
+                        yield f"[Error] Stripe request returned status {status}: {body}\n"
+                        
+                except urllib.error.HTTPError as e:
+                    body = e.read().decode('utf-8')
+                    if e.code == 403:
+                        yield "[SECURITY ALERT] Request blocked by Indra Edge Semantic Firewall!\n"
+                        yield f"[Reason] {body}\n"
+                        yield "[Agent] Breaking execution loop due to active block.\n"
+                        break
+                    elif e.code == 401:
+                        yield "[Security] Request allowed by Edge Semantic Firewall (aligned with task).\n"
+                        yield "[Stripe] Stripe API returned 401 Unauthorized (expected due to mock api key).\n"
+                    else:
+                        yield f"[Error] HTTP {e.code}: {e.reason}\n"
+                
+                if i < 5:
+                    yield "[Agent] Sleeping for 10 seconds...\n"
+                    time.sleep(10)
+                    
+            yield "[Agent] Loop complete.\n"
+            
+        except Exception as err:
+            yield f"[Error] Exception: {str(err)}\n"
+        finally:
+            try:
+                indra_sdk.close()
+                yield "[Indra] Session securely closed.\n"
+            except Exception as close_err:
+                print(f"[AGENT-ERROR] Failed to close agent session: {close_err}")
+                
+    return Response(stream_with_context(generate()), mimetype='text/plain')
 
