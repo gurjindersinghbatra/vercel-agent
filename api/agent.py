@@ -628,7 +628,7 @@ def index():
                         done = doneReading;
                         buffer += decoder.decode(value, { stream: !done });
                         
-                        const lines = buffer.split('\n');
+                        const lines = buffer.split('\\n');
                         buffer = lines.pop(); // Keep the last partial line in buffer
                         
                         for (const line of lines) {
