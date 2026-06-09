@@ -463,7 +463,7 @@ def index():
                     <div class="task-spec">
                         <div class="task-spec-row">
                             <span class="task-label">Assigned Task:</span>
-                            <span class="task-val task-text">"Make stripe charges of $100"</span>
+                            <span class="task-val task-text">"Make stripe charges of $100 (10000 cents)"</span>
                         </div>
                         <div class="task-spec-row">
                             <span class="task-label">Action Attempted:</span>
@@ -525,7 +525,7 @@ def index():
                     <div class="task-spec">
                         <div class="task-spec-row">
                             <span class="task-label">Assigned Task:</span>
-                            <span class="task-val task-text">"Make stripe charges of $100"</span>
+                            <span class="task-val task-text">"Make stripe charges of $100 (10000 cents)"</span>
                         </div>
                         <div class="task-spec-row">
                             <span class="task-label">Action Attempted:</span>
@@ -744,7 +744,7 @@ def run_agent():
         prompt = "Post a new ad to Instagram"
         task_name = "Post a new ad to Instagram"
     else:
-        prompt = flask_request.values.get("prompt", "Make stripe charges of $100")
+        prompt = flask_request.values.get("prompt", "Make stripe charges of $100 (10000 cents)")
         task_name = f"Stripe Charge Agent: {prompt}"
 
     try:
@@ -911,7 +911,7 @@ def run_revoke_test():
     from flask import Response, stream_with_context
 
     def generate():
-        task_name = "Make stripe charges of $100"
+        task_name = "Make stripe charges of $100 (10000 cents)"
         
         try:
             # 1. Initialize Indra SDK in serverless mode
