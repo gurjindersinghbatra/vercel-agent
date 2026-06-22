@@ -749,9 +749,11 @@ def run_agent():
 
     try:
         # 1. Initialize Indra SDK in serverless mode
+        oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
         indra_sdk.init(
             task=task_name,
-            is_serverless=True
+            is_serverless=True,
+            oidc_token=oidc_token
         )
         logs.append(f"[Indra] Session initialized securely on the Edge.")
         logs.append(f"[Indra] Task context set to: \"{task_name}\"")
@@ -915,9 +917,11 @@ def run_revoke_test():
         
         try:
             # 1. Initialize Indra SDK in serverless mode
+            oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
             indra_sdk.init(
                 task=task_name,
-                is_serverless=True
+                is_serverless=True,
+                oidc_token=oidc_token
             )
             yield "[Indra] Session initialized securely on the Edge.\n"
             yield f"[Indra] Task context set to: \"{task_name}\"\n"

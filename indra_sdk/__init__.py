@@ -31,7 +31,7 @@ def bypass_interceptor():
         _local.in_interceptor = old
 
 
-def init(task: str, delegation_token: str = None, env_var: str = None, daemon_url: str = "http://localhost:18787", is_serverless: bool = None):
+def init(task: str, delegation_token: str = None, env_var: str = None, daemon_url: str = "http://localhost:18787", is_serverless: bool = None, oidc_token: str = None):
     """
     Registers the active agent task session.
     In standard mode: Contacts the local sidecar daemon.
@@ -44,18 +44,18 @@ def init(task: str, delegation_token: str = None, env_var: str = None, daemon_ur
 
     _is_serverless = is_serverless
 
-    # 1. Resolve delegation token
-    if env_var:
-        delegation_token = os.getenv(env_var)
-        if not delegation_token:
-            raise ValueError(f"Environment variable '{env_var}' is empty or not set.")
-    elif not delegation_token:
-        delegation_token = os.getenv("INDRA_DELEGATION_TOKEN")
-        
-    if not delegation_token:
-        raise ValueError("INDRA_DELEGATION_TOKEN must be provided or set as an environment variable.")
-
     if not is_serverless:
+        # 1. Resolve delegation token
+        if env_var:
+            delegation_token = os.getenv(env_var)
+            if not delegation_token:
+                raise ValueError(f"Environment variable '{env_var}' is empty or not set.")
+        elif not delegation_token:
+            delegation_token = os.getenv("INDRA_DELEGATION_TOKEN")
+            
+        if not delegation_token:
+            raise ValueError("INDRA_DELEGATION_TOKEN must be provided or set as an environment variable.")
+
         # Standard sidecar/daemon registration
         pid = os.getpid()
         params = {
@@ -88,19 +88,6 @@ def init(task: str, delegation_token: str = None, env_var: str = None, daemon_ur
         worker_host = os.getenv("INDRA_WORKER_HOST") or "indra-edge-platform.dan-hollinger.workers.dev"
         _worker_host = worker_host
 
-        private_key_pem = os.getenv("INDRA_ANCHOR_KEY_PEM")
-        if not private_key_pem:
-            raise ValueError("INDRA_ANCHOR_KEY_PEM must be set in serverless mode.")
-
-        # Load the trust anchor RSA key
-        try:
-            rsa_private_key = serialization.load_pem_private_key(
-                private_key_pem.encode('utf-8'),
-                password=None
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to parse INDRA_ANCHOR_KEY_PEM: {e}")
-
         # Generate ephemeral EC P-256 session key
         ec_private_key = ec.generate_private_key(ec.SECP256R1())
         ec_public_key = ec_private_key.public_key()
@@ -120,36 +107,89 @@ def init(task: str, delegation_token: str = None, env_var: str = None, daemon_ur
         _public_jwk = public_jwk
         _session_key = ec_private_key
 
-        # Derive FIDO ID from RSA public key DER bytes
-        pub_bytes = rsa_private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        digest = hashes.Hash(hashes.SHA256())
-        digest.update(pub_bytes)
-        hash_bytes = digest.finalize()
-        fido_id = f"indra_fido_{hash_bytes[:8].hex()}"
-        _fido_id = fido_id
+        # Check for passwordless Vercel OIDC token
+        if not oidc_token:
+            oidc_token = os.getenv("VERCEL_OIDC_TOKEN")
+        if oidc_token:
+            del_token = os.getenv(env_var or "INDRA_DELEGATION_TOKEN")
+            if not del_token:
+                raise ValueError(f"Environment variable '{env_var or 'INDRA_DELEGATION_TOKEN'}' is empty or not set. Delegation token is required.")
+            # Parse token payload to resolve project ID
+            try:
+                parts = oidc_token.split('.')
+                payload_part = parts[1]
+                payload_part += '=' * (-len(payload_part) % 4)
+                jwt_payload = json.loads(base64.urlsafe_b64decode(payload_part).decode('utf-8'))
+                project_id = jwt_payload.get("project_id") or jwt_payload.get("projectId") or jwt_payload.get("project") or ""
+            except Exception:
+                project_id = ""
+            
+            # For serverless OIDC, the edge handles validation via the token and creates a workload derived identity
+            _fido_id = f"workload_vercel_{project_id}"
+            
+            payload = {
+                "fidoKey": "",
+                "mission": task,
+                "templateId": "default_agent_mission",
+                "idToken": oidc_token,
+                "delegationToken": del_token,
+                "publicJwk": public_jwk,
+                "signature": ""
+            }
+        else:
+            # Fallback to key-based serverless mode
+            if env_var:
+                delegation_token = os.getenv(env_var)
+                if not delegation_token:
+                    raise ValueError(f"Environment variable '{env_var}' is empty or not set.")
+            elif not delegation_token:
+                delegation_token = os.getenv("INDRA_DELEGATION_TOKEN")
+                
+            if not delegation_token:
+                raise ValueError("INDRA_DELEGATION_TOKEN must be provided or set as an environment variable in key-based serverless mode.")
 
-        # Sign handshake payload: missionName|fidoID|idToken|publicJwk
-        jwk_bytes = json.dumps(public_jwk, separators=(',', ':')).encode('utf-8')
-        data_to_sign = f"{task}|{fido_id}|{delegation_token}|{jwk_bytes.decode('utf-8')}".encode('utf-8')
+            private_key_pem = os.getenv("INDRA_ANCHOR_KEY_PEM")
+            if not private_key_pem:
+                raise ValueError("INDRA_ANCHOR_KEY_PEM must be set in key-based serverless mode.")
 
-        signature = rsa_private_key.sign(
-            data_to_sign,
-            padding.PKCS1v15(),
-            hashes.SHA256()
-        )
+            # Load the trust anchor RSA key
+            try:
+                rsa_private_key = serialization.load_pem_private_key(
+                    private_key_pem.encode('utf-8'),
+                    password=None
+                )
+            except Exception as e:
+                raise ValueError(f"Failed to parse INDRA_ANCHOR_KEY_PEM: {e}")
 
-        # Execute direct handshake call
-        payload = {
-            "fidoKey": base64.b64encode(pub_bytes).decode('utf-8'),
-            "mission": task,
-            "templateId": "default_agent_mission",
-            "idToken": delegation_token,
-            "publicJwk": public_jwk,
-            "signature": base64.b64encode(signature).decode('utf-8')
-        }
+            # Derive FIDO ID from RSA public key DER bytes
+            pub_bytes = rsa_private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            digest = hashes.Hash(hashes.SHA256())
+            digest.update(pub_bytes)
+            hash_bytes = digest.finalize()
+            fido_id = f"indra_fido_{hash_bytes[:8].hex()}"
+            _fido_id = fido_id
+
+            # Sign handshake payload: missionName|fidoID|idToken|publicJwk
+            jwk_bytes = json.dumps(public_jwk, separators=(',', ':')).encode('utf-8')
+            data_to_sign = f"{task}|{fido_id}|{delegation_token}|{jwk_bytes.decode('utf-8')}".encode('utf-8')
+
+            signature = rsa_private_key.sign(
+                data_to_sign,
+                padding.PKCS1v15(),
+                hashes.SHA256()
+            )
+
+            payload = {
+                "fidoKey": base64.b64encode(pub_bytes).decode('utf-8'),
+                "mission": task,
+                "templateId": "default_agent_mission",
+                "idToken": delegation_token,
+                "publicJwk": public_jwk,
+                "signature": base64.b64encode(signature).decode('utf-8')
+            }
 
         url = f"https://{worker_host}/api/mission/start"
         if worker_host.startswith("localhost:") or worker_host.startswith("127.0.0.1:"):
