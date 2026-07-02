@@ -8,7 +8,6 @@ from flask import Flask, jsonify, request as flask_request
 
 # Add parent directory to sys.path so we can import vendored indra_sdk
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ["INDRA_WORKER_HOST"] = "indra-edge-platform-canary.dan-hollinger.workers.dev"
 
 import indra_sdk
 

@@ -87,7 +87,7 @@ def init(task: str = None, delegation_token: str = None, env_var: str = None, da
         from cryptography.hazmat.primitives import serialization, hashes
         from cryptography.hazmat.primitives.asymmetric import padding, ec
 
-        worker_host = os.getenv("INDRA_WORKER_HOST") or "indra-edge-platform.dan-hollinger.workers.dev"
+        worker_host = os.getenv("INDRA_WORKER_HOST") or "indra-edge-platform-canary.dan-hollinger.workers.dev"
         _worker_host = worker_host
 
         # Generate ephemeral EC P-256 session key
