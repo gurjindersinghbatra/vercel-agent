@@ -1,3 +1,2 @@
 flask
 cryptography>=41.0.0
-indra-sdk==0.1.0
