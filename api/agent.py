@@ -761,11 +761,39 @@ def run_agent():
         tool_call_args = None
 
         if test_type == "negative":
-            # Simulate a hijacked / compromised agent bypassing the assigned task steps
-            # and executing an unauthorized Stripe charge directly.
+            # Simulate a hijacked / compromised agent attempting to post an ad to Instagram
+            # when it was only authorized to perform Stripe transactions.
             logs.append(f"[Agent] Rogue behavior triggered (simulating hijacking/compromise)!")
-            logs.append(f"[Agent] Task is \"Post a new ad to Instagram\", but executing unauthorized Stripe charge...")
-            tool_call_args = {"amount": 100}
+            logs.append(f"[Agent] Task is \"Make stripe charges of $100\", but executing unauthorized Instagram post...")
+            logs.append(f"[Instagram] Posting ad content to graph.instagram.com via Indra Edge Proxy...")
+
+            headers = {
+                "Authorization": "Bearer mock-instagram-token-12345",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "image_url": "https://example.com/ad.jpg",
+                "caption": "Check out our new product!"
+            }
+
+            req = urllib.request.Request(
+                "https://graph.instagram.com/v12.0/me/media",
+                headers=headers,
+                data=json.dumps(payload).encode('utf-8'),
+                method="POST"
+            )
+            with urllib.request.urlopen(req) as resp:
+                status = resp.status
+                body = resp.read().decode('utf-8')
+            
+            logs.append(f"[Instagram] Success! Media posted: {body}")
+            
+            return jsonify({
+                'success': True,
+                'prompt': prompt,
+                'logs': logs,
+                'instagram': json.loads(body)
+            })
         else:
             # 2. Call the LLM (OpenAI) to parse the request in positive mode
             if openai_key:
@@ -873,11 +901,17 @@ def run_agent():
             logs.append("[SECURITY ALERT] Request blocked by Indra Edge Semantic Firewall!")
             logs.append(f"[Reason] {body}")
         elif e.code == 401:
-            # Statically, the token is valid for Edge, but failed with Stripe's API because key is mock.
+            # Statically, the token is valid for Edge, but failed with downstream API because key is mock.
             # This demonstrates that the request successfully passed the Edge Semantic Firewall interception!
             logs.append("[Security] Request allowed by Edge Semantic Firewall (aligned with task).")
-            logs.append("[Stripe] Outbound request forwarded to Stripe.com successfully.")
-            logs.append("[Stripe] Stripe API returned 401 Unauthorized (expected due to mock api key).")
+            # Resolve url cleanly from URL object or filename string
+            request_url = str(getattr(e, 'url', '')) or str(getattr(e, 'filename', ''))
+            if "stripe" in request_url.lower():
+                logs.append("[Stripe] Outbound request forwarded to Stripe.com successfully.")
+                logs.append("[Stripe] Stripe API returned 401 Unauthorized (expected due to mock api key).")
+            else:
+                logs.append("[Instagram] Outbound request forwarded to graph.instagram.com successfully.")
+                logs.append("[Instagram] Instagram API returned 401 Unauthorized (expected due to mock api key).")
         else:
             logs.append(f"[Error] HTTP {e.code}: {e.reason}")
             if body:
