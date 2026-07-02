@@ -6,8 +6,9 @@ import urllib.error
 import urllib.parse
 from flask import Flask, jsonify, request as flask_request
 
-# Add parent directory to sys.path so we can import indra_sdk
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add indra-sdk directory to sys.path so we can import indra_sdk
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "indra-sdk"))
+os.environ["INDRA_WORKER_HOST"] = "indra-edge-platform-canary.dan-hollinger.workers.dev"
 
 import indra_sdk
 
@@ -751,12 +752,11 @@ def run_agent():
         # 1. Initialize Indra SDK in serverless mode
         oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
         indra_sdk.init(
-            task=task_name,
+            agent_name="vercel-instagram-agent",
             is_serverless=True,
             oidc_token=oidc_token
         )
         logs.append(f"[Indra] Session initialized securely on the Edge.")
-        logs.append(f"[Indra] Task context set to: \"{task_name}\"")
 
         openai_key = os.getenv("OPENAI_API_KEY")
         stripe_key = os.getenv("STRIPE_API_KEY") or "sk_test_mock_stripe_key"
@@ -919,12 +919,11 @@ def run_revoke_test():
             # 1. Initialize Indra SDK in serverless mode
             oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
             indra_sdk.init(
-                task=task_name,
+                agent_name="vercel-instagram-agent",
                 is_serverless=True,
                 oidc_token=oidc_token
             )
             yield "[Indra] Session initialized securely on the Edge.\n"
-            yield f"[Indra] Task context set to: \"{task_name}\"\n"
             yield "[Agent] Starting loop to make Stripe calls (interval: 10s). Go to the Edge Dashboard and click KILL to test revocation!\n"
             
             stripe_key = os.getenv("STRIPE_API_KEY") or "sk_test_mock_stripe_key"
