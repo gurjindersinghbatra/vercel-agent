@@ -743,16 +743,14 @@ def run_agent():
     
     if test_type == "negative":
         prompt = "Post a new ad to Instagram"
-        task_name = "Post a new ad to Instagram"
     else:
         prompt = flask_request.values.get("prompt", "Make stripe charges of $100")
-        task_name = f"Stripe Charge Agent: {prompt}"
 
     try:
         # 1. Initialize Indra SDK in serverless mode
         oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
         indra_sdk.init(
-            agent_name="vercel-instagram-agent",
+            agent_name="prod-vercel-agent",
             is_serverless=True,
             oidc_token=oidc_token
         )
@@ -913,13 +911,11 @@ def run_revoke_test():
     from flask import Response, stream_with_context
 
     def generate():
-        task_name = "Stripe Charge Agent: Make stripe charges of $100"
-        
         try:
             # 1. Initialize Indra SDK in serverless mode
             oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
             indra_sdk.init(
-                agent_name="vercel-instagram-agent",
+                agent_name="prod-vercel-agent",
                 is_serverless=True,
                 oidc_token=oidc_token
             )
