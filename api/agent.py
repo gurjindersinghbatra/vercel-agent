@@ -6,9 +6,6 @@ import urllib.error
 import urllib.parse
 from flask import Flask, jsonify, request as flask_request
 
-# Add parent directory to sys.path so we can import vendored indra_sdk
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import indra_sdk
 
 app = Flask(__name__)
