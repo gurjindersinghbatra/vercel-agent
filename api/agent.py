@@ -437,10 +437,18 @@ def index():
             <p class="subtitle">Demonstrating semantic security policy checks on AI agents via Cloudflare Edge Worker.</p>
         </header>
 
-        <div class="info-panel">
+        <div class="info-panel" style="flex-wrap: wrap; gap: 16px;">
             <div class="info-left">
-                <div class="info-icon"></div>
-                <div class="info-title">Active Operator Session</div>
+                <div id="session-status-light" class="info-icon" style="background-color: var(--text-secondary); box-shadow: none; animation: none;"></div>
+                <div class="info-title">Session: <span id="session-status-text" style="color: var(--text-secondary)">NO ACTIVE SESSION</span></div>
+            </div>
+            <div style="display: flex; gap: 12px; align-items: center;">
+                <button class="btn" style="width: auto; padding: 8px 16px; background: var(--accent-indigo); color: white;" onclick="performHandshake()">
+                    Initiate Handshake
+                </button>
+                <button class="btn" style="width: auto; padding: 8px 16px; background: rgba(244, 63, 94, 0.2); border: 1px solid var(--accent-rose); color: var(--accent-rose);" onclick="performRevocation()">
+                    Revoke Session
+                </button>
             </div>
             <div>
                 Authorized Scopes: <span class="info-scopes">stripe:write, instagram:write, admin</span>
@@ -567,6 +575,70 @@ def index():
     </div>
 
     <script>
+        async function performHandshake() {
+            appendLog("Initiating direct OIDC handshake with Edge Worker...", "log-indra");
+            try {
+                const response = await fetch('/api/handshake', { method: 'POST' });
+                const data = await response.json();
+                if (data.logs) {
+                    data.logs.forEach(l => appendLog(l, l.startsWith('[Error]') ? 'log-error' : 'log-indra'));
+                }
+                if (response.ok && data.success) {
+                    updateSessionUI(data.token);
+                } else {
+                    updateSessionUI(null);
+                }
+            } catch (err) {
+                appendLog(`Handshake connection error: ${err.message}`, 'log-error');
+            }
+        }
+
+        async function performRevocation() {
+            appendLog("Sending signed session termination request to Edge...", "log-indra");
+            try {
+                const response = await fetch('/api/revoke', { method: 'POST' });
+                const data = await response.json();
+                if (data.logs) {
+                    data.logs.forEach(l => appendLog(l, l.startsWith('[Error]') ? 'log-error' : 'log-indra'));
+                }
+                if (response.ok && data.success) {
+                    updateSessionUI(null);
+                }
+            } catch (err) {
+                appendLog(`Revocation connection error: ${err.message}`, 'log-error');
+            }
+        }
+
+        function updateSessionUI(token) {
+            const light = document.getElementById('session-status-light');
+            const text = document.getElementById('session-status-text');
+            if (token) {
+                light.style.backgroundColor = 'var(--accent-emerald)';
+                light.style.boxShadow = '0 0 10px var(--accent-emerald)';
+                light.style.animation = 'pulse 2s infinite';
+                text.innerText = `ACTIVE (${token.substring(0, 8)}...)`;
+                text.style.color = 'var(--accent-emerald)';
+            } else {
+                light.style.backgroundColor = 'var(--text-secondary)';
+                light.style.boxShadow = 'none';
+                light.style.animation = 'none';
+                text.innerText = 'NO ACTIVE SESSION';
+                text.style.color = 'var(--text-secondary)';
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const res = await fetch('/api/session');
+                const data = await res.json();
+                if (data.active) {
+                    updateSessionUI(data.token);
+                } else {
+                    updateSessionUI(null);
+                }
+            } catch (e) {}
+        });
+
         function getTimestamp() {
             const now = new Date();
             return now.toTimeString().split(' ')[0];
@@ -667,6 +739,11 @@ def index():
                 } finally {
                     statusDot.className = 'status-indicator';
                     statusText.innerText = 'IDLE';
+                    try {
+                        const res = await fetch('/api/session');
+                        const sessionData = await res.json();
+                        updateSessionUI(sessionData.active ? sessionData.token : null);
+                    } catch (e) {}
                 }
                 return;
             }
@@ -725,6 +802,11 @@ def index():
             } finally {
                 statusDot.className = 'status-indicator';
                 statusText.innerText = 'IDLE';
+                try {
+                    const res = await fetch('/api/session');
+                    const sessionData = await res.json();
+                    updateSessionUI(sessionData.active ? sessionData.token : null);
+                } catch (e) {}
             }
         }
     </script>
@@ -743,14 +825,17 @@ def run_agent():
         prompt = flask_request.values.get("prompt", "Make stripe charges of $100")
 
     try:
-        # 1. Initialize Indra SDK in serverless mode
-        oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
-        indra_sdk.init(
-            agent_name="prod-vercel-agent",
-            is_serverless=True,
-            oidc_token=oidc_token
-        )
-        logs.append(f"[Indra] Session initialized securely on the Edge.")
+        # 1. Initialize Indra SDK in serverless mode (only if not already active)
+        if not indra_sdk._mission_token:
+            oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
+            indra_sdk.init(
+                agent_name="prod-vercel-agent",
+                is_serverless=True,
+                oidc_token=oidc_token
+            )
+            logs.append(f"[Indra] Session initialized securely on the Edge (Auto-Handshake).")
+        else:
+            logs.append(f"[Indra] Using active session ({indra_sdk._mission_token[:8]}...)")
 
         openai_key = os.getenv("OPENAI_API_KEY")
         stripe_key = os.getenv("STRIPE_API_KEY") or "sk_test_mock_stripe_key"
@@ -928,11 +1013,8 @@ def run_agent():
             'error': str(e)
         }), 500
     finally:
-        try:
-            indra_sdk.close()
-            logs.append("[Indra] Session securely closed.")
-        except Exception as close_err:
-            print(f"[AGENT-ERROR] Failed to close agent session: {close_err}")
+        # R2 Compliance: Keep session active to accumulate context
+        logs.append("[Indra] Session kept active (Context Accumulation enabled).")
 
 
 @app.route('/api/revoke-test')
@@ -942,14 +1024,17 @@ def run_revoke_test():
 
     def generate():
         try:
-            # 1. Initialize Indra SDK in serverless mode
-            oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
-            indra_sdk.init(
-                agent_name="prod-vercel-agent",
-                is_serverless=True,
-                oidc_token=oidc_token
-            )
-            yield "[Indra] Session initialized securely on the Edge.\n"
+            # 1. Initialize Indra SDK in serverless mode (only if not already active)
+            if not indra_sdk._mission_token:
+                oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
+                indra_sdk.init(
+                    agent_name="prod-vercel-agent",
+                    is_serverless=True,
+                    oidc_token=oidc_token
+                )
+                yield "[Indra] Session initialized securely on the Edge (Auto-Handshake).\n"
+            else:
+                yield f"[Indra] Using active session ({indra_sdk._mission_token[:8]}...)\n"
             yield "[Agent] Starting loop to make Stripe calls (interval: 10s). Go to the Edge Dashboard and click KILL to test revocation!\n"
             
             stripe_key = os.getenv("STRIPE_API_KEY") or "sk_test_mock_stripe_key"
@@ -1007,11 +1092,52 @@ def run_revoke_test():
         except Exception as err:
             yield f"[Error] Exception: {str(err)}\n"
         finally:
-            try:
-                indra_sdk.close()
-                yield "[Indra] Session securely closed.\n"
-            except Exception as close_err:
-                print(f"[AGENT-ERROR] Failed to close agent session: {close_err}")
+            # R2 Compliance: Keep session active to accumulate context
+            yield "[Indra] Session kept active (Context Accumulation enabled).\n"
                 
     return Response(stream_with_context(generate()), mimetype='text/plain')
+
+
+@app.route('/api/session', methods=['GET'])
+def get_session():
+    if indra_sdk._mission_token:
+        return jsonify({'active': True, 'token': indra_sdk._mission_token})
+    return jsonify({'active': False})
+
+
+@app.route('/api/handshake', methods=['POST'])
+def do_handshake():
+    logs = []
+    try:
+        if indra_sdk._mission_token:
+            indra_sdk.close()
+            logs.append("[Indra] Closed previous active session.")
+        
+        oidc_token = flask_request.headers.get("x-vercel-oidc-token") or os.getenv("VERCEL_OIDC_TOKEN")
+        indra_sdk.init(
+            agent_name="prod-vercel-agent",
+            is_serverless=True,
+            oidc_token=oidc_token
+        )
+        logs.append(f"[Indra] Handshake successful. Ephemeral Session Token: {indra_sdk._mission_token[:8]}...")
+        return jsonify({'success': True, 'logs': logs, 'token': indra_sdk._mission_token})
+    except Exception as e:
+        logs.append(f"[Error] Handshake failed: {str(e)}")
+        return jsonify({'success': False, 'logs': logs, 'error': str(e)}), 500
+
+
+@app.route('/api/revoke', methods=['POST'])
+def do_revoke():
+    logs = []
+    try:
+        if indra_sdk._mission_token:
+            indra_sdk.close()
+            logs.append("[Indra] Session successfully terminated on the Edge.")
+            return jsonify({'success': True, 'logs': logs})
+        else:
+            logs.append("[Indra] No active session to terminate.")
+            return jsonify({'success': True, 'logs': logs})
+    except Exception as e:
+        logs.append(f"[Error] Revocation failed: {str(e)}")
+        return jsonify({'success': False, 'logs': logs, 'error': str(e)}), 500
 
